@@ -1,0 +1,10 @@
+.venv/
+__pycache__/
+*.pyc
+.idea/
+.env
+*.npy
+Pk050_3D_Dataset_Long_Rot00.npy
+X-values.npy
+Y-values.npy
+Z-values.npy
