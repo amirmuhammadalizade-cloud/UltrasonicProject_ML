@@ -1,7 +1,10 @@
-from matplotlib import pyplot as plt
-
-from data_loader import loading
 import numpy as np
+from scipy.ndimage import (
+    gaussian_filter1d,
+    median_filter,
+    uniform_filter1d,
+)
+from scipy.signal import find_peaks, savgol_filter, hilbert
 
 
 class Signal:
@@ -12,34 +15,11 @@ class Signal:
         self.y = y
         self.z = z
 
-
-    def show(self, x_index, y_index):
-        import matplotlib.pyplot as plt
-
-        a_scan = self.data[x_index, y_index, :]
-
-        plt.figure(figsize=(12, 5))
-        plt.plot(
-            self.z,
-            a_scan,
-            label=f"A-scan X index:{x_index}, Y index:{y_index}"
-        )
-
-        plt.xlabel("Time (µs)")
-        plt.ylabel("Amplitude")
-        plt.legend()
-        plt.grid(True)
-        plt.show()
-
-
     def non_empty_value_mask(self):
         mask = np.any(self.data != 0, axis=2)
         return mask
 
-
-    def compute_envelope(self, x_index, y_index):
-        from scipy.signal import hilbert
-
+    def compute_envelope(self, x_index, y_index) -> np.ndarray:
         mask = self.non_empty_value_mask()
 
         if not mask[x_index, y_index]:
@@ -52,15 +32,107 @@ class Signal:
 
         return envelope
 
-
     def Time(self):
         time = np.arange(len(self.z)) * 0.5
         return time
 
+    def set_filter(
+        self,
+        signal,
+        gaussian_f_s=None,
+        median_f_s=None,
+        uniform_f_s=None,
+        savgol_f_a=(None, None),
+    ):
+
+        filtering = Filtering(
+            signal=signal,
+            gaussian_f_sigma=gaussian_f_s,
+            median_f_size=median_f_s,
+            uniform_f_size=uniform_f_s,
+            savgol_f_amount=savgol_f_a,
+        )
+
+        return filtering
+
+
+class Filtering:
+
+    def __init__(
+        self,
+        signal: np.ndarray,
+        gaussian_f_sigma=None,
+        median_f_size=None,
+        uniform_f_size=None,
+        savgol_f_amount=(None, None),
+    ):
+
+        self.signal = signal
+
+        self.gaussian_f_sigma = gaussian_f_sigma
+        self.median_f_size = median_f_size
+        self.uniform_f_size = uniform_f_size
+
+        self.savgol_f_window = savgol_f_amount[0]
+        self.savgol_f_polyorder = savgol_f_amount[1]
+
+    def apply(self):
+        signal = self.signal
+
+        if self.gaussian_f_sigma is not None:
+            signal = gaussian_filter1d(
+                signal,
+                self.gaussian_f_sigma
+            )
+
+        if self.median_f_size is not None:
+            signal = median_filter(
+                signal,
+                self.median_f_size
+            )
+
+        if self.uniform_f_size is not None:
+            signal = uniform_filter1d(
+                signal,
+                self.uniform_f_size
+            )
+
+        if self.savgol_f_window is not None:
+            signal = savgol_filter(
+                signal,
+                window_length=self.savgol_f_window,
+                polyorder=self.savgol_f_polyorder
+            )
+
+        return signal
+
+
+from data_loader import loading
+from matplotlib import pyplot as plt
 
 data, x, y, z = loading()
+
 k050 = Signal(data, x, y, z)
 
-plt.plot(k050.Time(), k050.compute_envelope(50, 10))
+envelope = k050.compute_envelope(50, 10)
+
+filtering = k050.set_filter(
+    signal=envelope,
+    gaussian_f_s=4,
+    median_f_s=5,
+    uniform_f_s=22,
+    savgol_f_a=(13, 5)
+)
+
+filtered_signal = filtering.apply()
+
+
+
+plt.plot(k050.Time(), envelope, label= 'envelope', alpha = 0.7)
+plt.plot(k050.Time(), filtered_signal ,
+          label= 'filtered_signal')
+
+plt.grid(True)
+plt.legend()
 plt.show()
 
