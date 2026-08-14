@@ -31,9 +31,15 @@ class Signal:
         """ماسک نقاطی از شبکه که داده واقعی دارند (غیر صفر)."""
         return np.any(self.data != 0, axis=2)
 
-    def compute_envelope(self, x_index: int, y_index: int) -> np.ndarray:
-        """پوش (envelope) یک A-scan را با تبدیل هیلبرت محاسبه می‌کند."""
-        mask = self.non_empty_value_mask()
+    def compute_envelope(
+            self,
+            x_index: int,
+            y_index: int,
+            mask: np.ndarray | None = None,
+    ) -> np.ndarray:
+
+        if mask is None:
+            mask = self.non_empty_value_mask()
 
         if not mask[x_index, y_index]:
             raise ValueError("Selected measurement point is empty.")
@@ -152,41 +158,63 @@ class FrequencyDomainFeatures:
         self.signal = signal
         self.sampling_rate = sampling_rate
 
+        # FFT فقط یک بار محاسبه می‌شود
+        self.frequencies, self.magnitude = self._magnitude_spectrum()
+
     def _magnitude_spectrum(self) -> tuple:
-        """طیف دامنه یک‌طرفه FFT (فرکانس‌ها، دامنه‌های متناظر)."""
+        """طیف دامنه یک‌طرفه FFT را یک بار محاسبه می‌کند."""
         spectrum = np.fft.rfft(self.signal)
-        frequencies = np.fft.rfftfreq(self.signal.size, d=1.0 / self.sampling_rate)
+
+        frequencies = np.fft.rfftfreq(
+            self.signal.size,
+            d=1.0 / self.sampling_rate
+        )
+
         magnitude = np.abs(spectrum)
+
         return frequencies, magnitude
 
     def dominant_frequency(self) -> float:
-        frequencies, magnitude = self._magnitude_spectrum()
-        return float(frequencies[int(np.argmax(magnitude))])
+        """فرکانسی که بیشترین دامنه را دارد."""
+
+        return float(
+            self.frequencies[int(np.argmax(self.magnitude))]
+        )
 
     def spectral_centroid(self) -> float:
-        frequencies, magnitude = self._magnitude_spectrum()
-        total_magnitude = np.sum(magnitude)
+        """مرکز ثقل طیف فرکانسی."""
+
+        total_magnitude = np.sum(self.magnitude)
 
         if total_magnitude == 0:
             return 0.0
 
-        return float(np.sum(frequencies * magnitude) / total_magnitude)
+        return float(
+            np.sum(self.frequencies * self.magnitude)
+            / total_magnitude
+        )
 
     def bandwidth(self, level_db: float = -6.0) -> float:
-        """پهنای باند سیگنال بر اساس آستانه سطح افت نسبت به پیک طیفی (پیش‌فرض ۶- دسی‌بل)."""
-        frequencies, magnitude = self._magnitude_spectrum()
-        peak_magnitude = np.max(magnitude)
+        """پهنای باند بر اساس سطح افت نسبت به پیک."""
+
+        peak_magnitude = np.max(self.magnitude)
 
         if peak_magnitude == 0:
             return 0.0
 
         threshold = peak_magnitude * (10 ** (level_db / 20.0))
-        above_threshold = np.where(magnitude >= threshold)[0]
+
+        above_threshold = np.where(
+            self.magnitude >= threshold
+        )[0]
 
         if above_threshold.size == 0:
             return 0.0
 
-        return float(frequencies[above_threshold[-1]] - frequencies[above_threshold[0]])
+        return float(
+            self.frequencies[above_threshold[-1]]
+            - self.frequencies[above_threshold[0]]
+        )
 
 
 @dataclass

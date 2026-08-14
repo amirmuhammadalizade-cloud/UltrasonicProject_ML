@@ -242,10 +242,13 @@ class DatasetBuilder:
         x_indices, y_indices = np.nonzero(mask)
 
         for x_index, y_index in zip(x_indices, y_indices):
-            x_index = int(x_index)
-            y_index = int(y_index)
 
-            raw_envelope = self.signal_obj.compute_envelope(x_index, y_index)
+
+            raw_envelope = self.signal_obj.compute_envelope(
+                x_index,
+                y_index,
+                mask=mask,
+            )
             filtered_signal = self.signal_obj.set_filter(
                 raw_envelope, **self.filter_params
             ).apply()
@@ -319,4 +322,5 @@ if __name__ == "__main__":
     
     import pandas as pd
     df = pd.DataFrame(dataset_rows)
+    df.to_excel("dataset.xlsx", index=False)
     print(df.head())
