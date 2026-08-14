@@ -197,10 +197,11 @@ class DatasetBuilder:
                 ``calibrated_depth_estimate``).
             ground_truth: تولیدکنندهٔ عمق واقعی بر اساس هندسهٔ نمونه (برای
                 label ``true_depth``).
-            filter_params: دیکشنری پارامترهای فیلتر که مستقیماً به
-                ``Signal.set_filter`` پاس داده می‌شود (مثلاً
-                ``gaussian_f_s``, ``median_f_s``, ``uniform_f_s``,
-                ``savgol_f_a``).
+            filter_params: دیکشنری حاوی کلید ``steps`` که مستقیماً به
+                ``Signal.set_filter`` پاس داده می‌شود، مثلاً:
+                ``{"steps": [("gaussian", {"sigma": 3})]}``. با این فرمت
+                کاربر می‌تواند هر ترکیب و ترتیب دلخواهی از فیلترها
+                (gaussian, median, uniform, savgol) را مشخص کند.
             noise_window: برش (slice) ابتدای هر A-scan که فاقد echo است و
                 برای محاسبهٔ SNR استفاده می‌شود.
         """
@@ -300,17 +301,22 @@ if __name__ == "__main__":
     )
 
     # 3) بارگذاری Signal واقعی از دیتاست BAM (اینجا فقط جایگزین نمایشی):
-    # signal_obj = Signal(data=raw_bam_data, x=x_axis_mm, y=y_axis_mm, z=z_axis)
-    #
-    # builder = DatasetBuilder(
-    #     signal_obj=signal_obj,
-    #     depth_calibration=calibration,
-    #     ground_truth=ground_truth,
-    #     filter_params={"gaussian_f_s": 3},
-    #     noise_window=slice(0, 40),
-    # )
-    # dataset_rows = builder.build()
-    #
-    # import pandas as pd
-    # df = pd.DataFrame(dataset_rows)
-    # print(df.head())
+    from data_loader import load_sample
+    raw_bam_data, x_axis_mm, y_axis_mm, z_axis = load_sample('Pk050_3D_Dataset_Long_Rot00')
+    signal_obj = Signal(data=raw_bam_data, x=x_axis_mm, y=y_axis_mm, z=z_axis)
+
+    print(signal_obj.data.shape)
+    print(signal_obj.non_empty_value_mask().sum())  # تعداد نقاط معتبر
+    
+    builder = DatasetBuilder(
+         signal_obj=signal_obj,
+         depth_calibration=calibration,
+         ground_truth=ground_truth,
+         filter_params={"steps": [("gaussian", {"sigma": 3})]},
+         noise_window=slice(0, 40),
+     )
+    dataset_rows = builder.build()
+    
+    import pandas as pd
+    df = pd.DataFrame(dataset_rows)
+    print(df.head())
