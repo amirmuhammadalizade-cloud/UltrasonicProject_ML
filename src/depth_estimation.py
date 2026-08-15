@@ -245,9 +245,8 @@ class DatasetBuilder:
 
 
             raw_envelope = self.signal_obj.compute_envelope(
-                x_index,
-                y_index,
-                mask=mask,
+                x_index = x_index,
+                y_index = y_index
             )
             filtered_signal = self.signal_obj.set_filter(
                 raw_envelope, **self.filter_params

@@ -1,197 +1,244 @@
-"""پردازش سیگنال، استخراج ویژگی و برآورد عمق برای اندازه‌گیری‌های التراسونیک روی نمونه بتنی.
-
-ساختار فایل (به ترتیب جریان داده):
-    1. Signal / Filtering -> دسترسی به داده خام و فیلترینگ سیگنال
-    2. TimeDomainFeatures -> ویژگی‌های حوزه زمان
-    3. FrequencyDomainFeatures -> ویژگی‌های حوزه فرکانس
-    4. SignalFeatures / FeatureExtractor -> جمع‌آوری ویژگی‌ها در یک خروجی واحد
-    5. EchoDetector -> آشکارسازی چند echo در یک A-scan
-    6. DepthEstimator -> تبدیل زمان پرواز به عمق فیزیکی
-    7. signal_to_noise_ratio -> معیار کیفیت سیگنال
-    8. DatasetBuilder -> اجرای کل pipeline روی تمام نقاط شبکه
-"""
-
-from dataclasses import asdict, dataclass
-
 import numpy as np
 from scipy.ndimage import gaussian_filter1d, median_filter, uniform_filter1d
 from scipy.signal import find_peaks, hilbert, savgol_filter
+from dataclasses import asdict, dataclass
 
 
 class Signal:
-    """دسترسی به داده خام یک شبکه اندازه‌گیری و عملیات پایه روی هر A-scan."""
-
-    def __init__(self, data: np.ndarray, x: np.ndarray, y: np.ndarray, z: np.ndarray):
+    def __init__(self, data, x, y, z, dead_zone_samples=90):
         self.data = data
         self.x = x
         self.y = y
         self.z = z
+        self.dead_zone_samples = dead_zone_samples
+        self.position_mask = np.any(self.data != 0, axis=2)
+        self._envelope_volume = self._compute_envelope_volume()
 
-    def non_empty_value_mask(self) -> np.ndarray:
-        """ماسک نقاطی از شبکه که داده واقعی دارند (غیر صفر)."""
-        return np.any(self.data != 0, axis=2)
+    def time(self):
+        return np.asarray(self.z[self.dead_zone_samples:], dtype=float)
 
-    def compute_envelope(self, x_index: int, y_index: int) -> np.ndarray:
-        """پوش (envelope) یک A-scan را با تبدیل هیلبرت محاسبه می‌کند."""
-        mask = self.non_empty_value_mask()
+    def raw_signal(self, x_index, y_index):
+        return self.data[x_index, y_index, self.dead_zone_samples:]
 
-        if not mask[x_index, y_index]:
-            raise ValueError("Selected measurement point is empty.")
-
-        a_scan = self.data[x_index, y_index, :]
-        analytic_signal = hilbert(a_scan)
-        return np.abs(analytic_signal)
-
-    def Time(self) -> np.ndarray:
-        """محور زمانی واقعی یک A-scan، بر حسب میکروثانیه.
-
-        این محور از ``self.z`` (که در ``data_loader.load_files`` مستقیماً از
-        فایل ``Z-values.npy`` بارگذاری شده) گرفته می‌شود، نه از یک گام زمانی
-        فرضی و هارد-کدشده. استفاده از مقدار واقعیِ بارگذاری‌شده باعث می‌شود
-        اگر گام نمونه‌برداری بین نمونه‌ها متفاوت باشد، محاسبات بعدی
-        (time_of_flight، sampling_rate و غیره) همچنان درست بمانند.
+    def _compute_envelope_volume(self) -> np.ndarray:
         """
-        return np.asarray(self.z, dtype=float)
+        پوش سیگنال (envelope) را برای تمام نقاط معتبر گرید به‌صورت برداری
+        (vectorized) و در یک فراخوانی واحد محاسبه می‌کند، به‌جای فراخوانی
+        جداگانه‌ی hilbert برای هر پیکسل.
 
-    def set_filter(
-        self, signal: np.ndarray, steps: list[tuple[str, dict]]
-    ) -> "Filtering":
-        """یک شیء Filtering با ترتیب و ترکیب دلخواه کاربر از فیلترها می‌سازد.
-
-        Args:
-            signal: سیگنال ورودی برای فیلتر کردن.
-            steps: لیست ترتیبی از (نام_فیلتر, پارامترها)، مثلاً:
-                [("median", {"size": 5}), ("gaussian", {"sigma": 4})]
-        """
-        return Filtering(signal=signal, steps=steps)
-
-
-class Filtering:
-    """زنجیره‌ای از فیلترها که به همان ترتیبی که مشخص شده اعمال می‌شوند."""
-
-    _FILTER_FUNCTIONS = {
-        "gaussian": gaussian_filter1d,
-        "median": median_filter,
-        "uniform": uniform_filter1d,
-    }
-
-    def __init__(self, signal: np.ndarray, steps: list[tuple[str, dict]]):
-        """
-        Args:
-            signal: سیگنال ورودی.
-            steps: لیست ترتیبی از (نام_فیلتر, پارامترها)، مثلاً:
-                [("median", {"size": 5}), ("gaussian", {"sigma": 4})]
-        """
-        self.signal = signal
-        self.steps = steps
-
-    def apply(self) -> np.ndarray:
-        signal = self.signal
-        for name, params in self.steps:
-            if name == "savgol":
-                signal = savgol_filter(signal, **params)
-            else:
-                signal = self._FILTER_FUNCTIONS[name](signal, **params)
-        return signal # type: ignore
-
-
-class TimeDomainFeatures:
-    """ویژگی‌های حوزه زمان یک A-scan (envelope یا سیگنال فیلتر شده)."""
-
-    def __init__(self, signal: np.ndarray, time: np.ndarray):
-        self.signal = signal
-        self.time = time
-
-    def peak_amplitude(self) -> float:
-        return float(np.max(self.signal))
-
-    def time_of_flight(self) -> float:
-        peak_index = np.argmax(self.signal)
-        return float(self.time[peak_index])
-
-    def peak_slope(self) -> float:
-        """شیب پیک.
+        محاسبه فقط روی نقاط معتبر (position_mask) انجام می‌شود تا هم در
+        زمان محاسبه و هم در محاسبات بی‌مورد روی نقاط zero-padded صرفه‌جویی شود.
 
         Returns:
-            شیب بزرگترین قله رو حساب میکنه
+            آرایه‌ای هم‌شکل با self.data؛ در نقاط معتبر مقدار envelope و در
+            نقاط خارج از ناحیه‌ی اندازه‌گیری مقدار صفر دارد.
         """
-        peak_index = int(np.argmax(self.signal))
-        peak_value = self.signal[peak_index]
+        envelope_volume = np.zeros_like(self.data, dtype=float)
+        valid_scans = self.data[self.position_mask]  # shape: (n_valid, Z)
+        envelope_volume[self.position_mask] = np.abs(hilbert(valid_scans, axis=1))
+        return envelope_volume
 
-        if peak_value <= 0 or peak_index == 0:
-            return 0.0
-
-        low_level = 0
-        high_level = peak_value
-        segment = self.signal[: peak_index + 1]
-
-        low_crossings = np.where(segment == low_level)[-1]
-        high_crossings = np.where(segment == high_level)[0]
-
-        if low_crossings.size == 0 or high_crossings.size == 0:
-            return 0.0
-        denominator = float(self.time[int(high_crossings[0])] - self.time[int(low_crossings[0])])
-        if denominator == 0:
-            return 0.0
-
-        slope = peak_value / denominator
-        return slope
-
-    def signal_energy(self) -> float:
-        return float(np.sum(self.signal ** 2))
-
-    def rms(self) -> float:
-        return float(np.sqrt(np.mean(self.signal ** 2)))
+    def compute_envelope(self, x_index: int, y_index: int) -> np.ndarray:
+        return self._envelope_volume[x_index, y_index, self.dead_zone_samples:]
 
 
-class FrequencyDomainFeatures:
-    """ویژگی‌های حوزه فرکانس (طیف FFT)."""
+def apply_filters(signal, steps):
+    for name, params in steps:
+        if name == "savgol":
+            signal = savgol_filter(signal, **params)
+        elif name == "gaussian":
+            signal = gaussian_filter1d(signal, **params)
+        elif name == "median":
+            signal = median_filter(signal, **params)
+        elif name == "uniform":
+            signal = uniform_filter1d(signal, **params)
+        else:
+            raise ValueError(f"Unknown filter step: {name!r}")
+    return signal
 
-    def __init__(self, signal: np.ndarray, sampling_rate: float):
-        self.signal = signal
-        self.sampling_rate = sampling_rate
 
-    def _magnitude_spectrum(self) -> tuple:
-        """طیف دامنه یک‌طرفه FFT (فرکانس‌ها، دامنه‌های متناظر)."""
-        spectrum = np.fft.rfft(self.signal)
-        frequencies = np.fft.rfftfreq(self.signal.size, d=1.0 / self.sampling_rate)
-        magnitude = np.abs(spectrum)
-        return frequencies, magnitude
+def restrict_to_window(signal: np.ndarray, time: np.ndarray, t_min: float = 80.0, t_max: float = 320.0):
+    """
+    سیگنال و زمان را به بازه‌ی [t_min, t_max] محدود می‌کند تا از قفل‌شدن
+    peak-detection روی ringdown اولیه‌ی مبدل (که تا حدود ۱۰۰۰µs ادامه دارد
+    ولی همیشه بزرگ‌ترین دامنه‌ی مطلق سیگنال است) جلوگیری شود.
 
-    def dominant_frequency(self) -> float:
-        frequencies, magnitude = self._magnitude_spectrum()
-        return float(frequencies[int(np.argmax(magnitude))])
+    بازه‌ی پیش‌فرض بر اساس محدوده‌ی زمان‌پرواز کالیبره‌شده‌ی قبلی
+    (۱۱۳ تا ۲۷۳ میکروثانیه) با کمی حاشیه‌ی اطمینان انتخاب شده است.
 
-    def spectral_centroid(self) -> float:
-        frequencies, magnitude = self._magnitude_spectrum()
-        total_magnitude = np.sum(magnitude)
+    Args:
+        signal: آرایه‌ی سیگنال (envelope یا raw) پس از حذف ناحیه‌ی مرده.
+        time: آرایه‌ی زمان متناظر (میکروثانیه).
+        t_min: ابتدای بازه‌ی مجاز جست‌وجوی اکو.
+        t_max: انتهای بازه‌ی مجاز جست‌وجوی اکو.
 
-        if total_magnitude == 0:
-            return 0.0
+    Returns:
+        (windowed_signal, windowed_time)
+    """
+    mask = (time >= t_min) & (time <= t_max)
+    return signal[mask], time[mask]
 
-        return float(np.sum(frequencies * magnitude) / total_magnitude)
 
-    def bandwidth(self, level_db: float = -6.0) -> float:
-        """پهنای باند سیگنال بر اساس آستانه سطح افت نسبت به پیک طیفی (پیش‌فرض ۶- دسی‌بل)."""
-        frequencies, magnitude = self._magnitude_spectrum()
-        peak_magnitude = np.max(magnitude)
+def find_echoes(signal, time, min_height=None, min_distance=20):
+    indices, _ = find_peaks(signal, height=min_height, distance=min_distance)
+    return indices, time[indices], signal[indices]
 
-        if peak_magnitude == 0:
-            return 0.0
 
-        threshold = peak_magnitude * (10 ** (level_db / 20.0))
-        above_threshold = np.where(magnitude >= threshold)[0]
+def strongest_echo(signal: np.ndarray, time: np.ndarray, min_distance: int = 20):
+    """
+    قوی‌ترین بیشینه‌ی محلی (echo) را در سیگنال پیدا می‌کند.
 
-        if above_threshold.size == 0:
-            return 0.0
+    برخلاف argmax خام که ممکن است لبه‌ی یک پنجره‌ی زمانی برش‌خورده را (که
+    یک نقطه‌ی محلی واقعی نیست، بلکه فقط باقیمانده‌ی افت یک نوسان قبلی است)
+    به‌اشتباه به‌عنوان پیک انتخاب کند، این تابع فقط بیشینه‌های محلی واقعی
+    (نقاطی که همسایه‌های چپ و راستشان کمتر است) را در نظر می‌گیرد؛ نقاط
+    ابتدا/انتهای بازه هرگز به‌عنوان پیک شناسایی نمی‌شوند.
 
-        return float(frequencies[above_threshold[-1]] - frequencies[above_threshold[0]])
+    Args:
+        signal: سیگنال (envelope) پس از محدودشدن به پنجره‌ی زمانی موردانتظار
+            (خروجی restrict_to_window).
+        time: آرایه‌ی زمان متناظر.
+        min_distance: حداقل فاصله‌ی نمونه‌ای بین دو اکوی مجزا.
+
+    Returns:
+        (amplitude, time_of_flight) قوی‌ترین اکوی پیداشده. اگر هیچ بیشینه‌ی
+        محلی واقعی پیدا نشود (سیگنال در کل پنجره یکنواخت صعودی/نزولی است)،
+        به argmax ساده روی همان پنجره برمی‌گردد (fallback آشکار، نه صفر
+        بی‌سروصدا).
+    """
+    indices, times, amplitudes = find_echoes(signal, time, min_distance=min_distance)
+    if indices.size == 0:
+        peak_index = int(np.argmax(signal))
+        return float(signal[peak_index]), float(time[peak_index])
+    best = int(np.argmax(amplitudes))
+    return float(amplitudes[best]), float(times[best])
+
+
+def peak_slope(signal: np.ndarray, time: np.ndarray) -> float:
+    """
+    شیب لبه‌ی صعودی سیگنال تا پیک اصلی (بیشینه‌ی کلی) را محاسبه می‌کند.
+
+    الگوریتم:
+    ۱. اندیس بیشینه‌ی کلی سیگنال (پیک اصلی) پیدا می‌شود.
+    ۲. با جست‌وجوی رو به عقب از پیک -و فقط در همان بازه- نزدیک‌ترین کمینه‌ی
+       محلی به‌عنوان نقطه‌ی شروع صعود انتخاب می‌شود. اگر چنین کمینه‌ای یافت
+       نشود (سیگنال از همان نمونه‌ی اول در حال صعود بوده)، شروع صعود همان
+       نمونه‌ی اول در نظر گرفته می‌شود.
+    ۳. شیب به‌صورت (دامنه‌ی پیک - دامنه‌ی شروع) تقسیم بر (زمان پیک - زمان شروع)
+       محاسبه می‌شود.
+
+    محدود کردن جست‌وجو به بازه‌ی [۰, peak_index] باعث می‌شود شیب همیشه مربوط
+    به لبه‌ی صعودی همان پیک اصلی باشد، نه پرشی نامرتبط به‌سمت یک اکوی دیگر.
+
+    Args:
+        signal: آرایه‌ی envelope (یا سیگنال فیلترشده) پس از حذف ناحیه‌ی مرده.
+        time: آرایه‌ی زمان متناظر با signal (به میکروثانیه).
+
+    Returns:
+        شیب لبه‌ی صعودی تا پیک (دامنه بر میکروثانیه). در صورت نامعتبر بودن
+        ورودی، یا اگر پیک در نمونه‌ی اول باشد، یا dt صفر/منفی شود، مقدار
+        0.0 برگردانده می‌شود.
+    """
+    signal = np.asarray(signal, dtype=float)
+    time = np.asarray(time, dtype=float)
+
+    if signal.size < 2 or signal.size != time.size:
+        return 0.0
+
+    peak_index = int(np.argmax(signal))
+    if peak_index == 0:
+        return 0.0
+
+    slopes_before_peak = np.diff(signal[: peak_index + 1])
+    local_min_candidates = np.where(
+        (slopes_before_peak[:-1] <= 0) & (slopes_before_peak[1:] > 0)
+    )[0]
+
+    start_index = (
+        int(local_min_candidates[-1] + 1) if local_min_candidates.size > 0 else 0
+    )
+
+    dt = time[peak_index] - time[start_index]
+    if dt <= 0:
+        return 0.0
+
+    return float((signal[peak_index] - signal[start_index]) / dt)
+
+
+def signal_energy(signal):
+    return float(np.sum(signal ** 2))
+
+
+def rms(signal):
+    return float(np.sqrt(np.mean(signal ** 2)))
+
+
+def snr(signal: np.ndarray, noise_window: int = 500) -> float:
+    """
+    نسبت سیگنال به نویز (SNR) را با مقایسه‌ی دامنه‌ی پیک اصلی به انحراف‌معیار
+    یک بازه‌ی اولیه (فرض بر نویز زمینه پیش از رسیدن اکوی برگشتی) محاسبه می‌کند.
+
+    مهم: این تابع باید روی سیگنال کامل (پیش از restrict_to_window) صدا زده
+    شود، چون بازه‌ی نویز مرجع از ابتدای سیگنال گرفته می‌شود.
+
+    Args:
+        signal: سیگنال (envelope یا raw) پس از حذف ناحیه‌ی مرده، پیش از
+            محدودشدن به پنجره‌ی زمانی.
+        noise_window: تعداد نمونه‌ی ابتدایی که به‌عنوان نویز زمینه در نظر
+            گرفته می‌شود.
+
+    Returns:
+        نسبت دامنه‌ی پیک به انحراف‌معیار نویز زمینه. در صورت صفر بودن نویز
+        زمینه یا سیگنال کوتاه‌تر از noise_window، مقدار 0.0 برمی‌گردد.
+    """
+    if signal.size <= noise_window:
+        return 0.0
+    noise_std = float(np.std(signal[:noise_window]))
+    if noise_std == 0:
+        return 0.0
+    return float(np.max(signal) / noise_std)
+
+
+def magnitude_spectrum(signal, sampling_rate):
+    spectrum = np.fft.rfft(signal)
+    frequencies = np.fft.rfftfreq(signal.size, d=1.0 / sampling_rate)
+    magnitude = np.abs(spectrum)
+    return frequencies, magnitude
+
+
+def dominant_frequency(signal, sampling_rate):
+    frequencies, magnitude = magnitude_spectrum(signal, sampling_rate)
+    return float(frequencies[int(np.argmax(magnitude))])
+
+
+def spectral_centroid(signal, sampling_rate):
+    frequencies, magnitude = magnitude_spectrum(signal, sampling_rate)
+    total_magnitude = np.sum(magnitude)
+
+    if total_magnitude == 0:
+        return 0.0
+
+    return float(np.sum(frequencies * magnitude) / total_magnitude)
+
+
+def bandwidth(signal, sampling_rate, level_db=-6.0):
+    frequencies, magnitude = magnitude_spectrum(signal, sampling_rate)
+    peak_magnitude = np.max(magnitude)
+
+    if peak_magnitude == 0:
+        return 0.0
+
+    threshold = peak_magnitude * (10 ** (level_db / 20.0))
+    above_threshold = np.where(magnitude >= threshold)[0]
+
+    if above_threshold.size == 0:
+        return 0.0
+
+    return float(frequencies[above_threshold[-1]] - frequencies[above_threshold[0]])
 
 
 @dataclass
 class SignalFeatures:
-    """خروجی ساخت‌یافته‌ی تمام ویژگی‌های استخراج‌شده از یک A-scan (آماده برای دیتاست ML)."""
-
     peak_amplitude: float
     time_of_flight: float
     peak_slope: float
@@ -201,76 +248,56 @@ class SignalFeatures:
     spectral_centroid: float
     bandwidth: float
 
-    def to_dict(self) -> dict:
+    def to_dict(self):
         return asdict(self)
 
 
-class FeatureExtractor:
-    """نقطه ورودی واحد: envelope/سیگنال فیلترشده را می‌گیرد و SignalFeatures برمی‌گرداند."""
-
-    def __init__(self, signal: np.ndarray, time: np.ndarray, sampling_rate: float):
-        self.time_features = TimeDomainFeatures(signal, time)
-        self.freq_features = FrequencyDomainFeatures(signal, sampling_rate)
-
-    def extract(self) -> SignalFeatures:
-        return SignalFeatures(
-            peak_amplitude=self.time_features.peak_amplitude(),
-            time_of_flight=self.time_features.time_of_flight(),
-            peak_slope=self.time_features.peak_slope(),
-            signal_energy=self.time_features.signal_energy(),
-            rms=self.time_features.rms(),
-            dominant_frequency=self.freq_features.dominant_frequency(),
-            spectral_centroid=self.freq_features.spectral_centroid(),
-            bandwidth=self.freq_features.bandwidth(),
-        )
+def extract_features(envelope, raw_signal, time, sampling_rate):
+    peak_amp, tof = strongest_echo(envelope, time)
+    return SignalFeatures(
+        peak_amplitude=peak_amp,
+        time_of_flight=tof,
+        peak_slope=peak_slope(envelope, time),
+        signal_energy=signal_energy(envelope),
+        rms=rms(envelope),
+        dominant_frequency=dominant_frequency(raw_signal, sampling_rate),
+        spectral_centroid=spectral_centroid(raw_signal, sampling_rate),
+        bandwidth=bandwidth(raw_signal, sampling_rate),
+    )
 
 
-class EchoDetector:
-    """آشکارسازی چندین echo در یک A-scan با استفاده از پیک‌یابی."""
+def groundtruth_depth(x_position_mm: float) -> float:
+    """
+    ضخامت واقعی نمونه‌ی پله‌ای Pk050 را بر اساس موقعیت X (به میلی‌متر) برمی‌گرداند.
 
-    def __init__(self, signal: np.ndarray, time: np.ndarray):
-        self.signal = signal
-        self.time = time
+    نمونه شامل ۴ پله با طول تقریبی ۵۰۰ میلی‌متر و ضخامت‌های مشخص است. این تابع
+    فقط یک جدول جست‌وجوی ساده بر اساس مرز پله‌هاست، نه یک مدل فیزیکی.
+    ترتیب پله‌ها (X کوچک = ضخیم‌ترین) با بررسی همبستگی time_of_flight نسبت
+    به x_position_mm در دیتاست واقعی تأیید شده است.
 
-    def find_echoes(self, min_height: float | None = None, min_distance: int = 20) -> tuple:
-        """موقعیت زمانی و دامنه تمام echoهای قابل‌تشخیص را برمی‌گرداند.
+    Args:
+        x_position_mm: موقعیت واقعی نقطه روی محور X به میلی‌متر (نه اندیس گرید).
 
-        Returns:
-            تاپلی از (اندیس نمونه‌ها، زمان echoها، دامنه echoها).
-        """
-        indices, _ = find_peaks(self.signal, height=min_height, distance=min_distance)
-        return indices, self.time[indices], self.signal[indices]
+    Returns:
+        ضخامت واقعی نمونه در همان موقعیت (میلی‌متر).
+
+    Raises:
+        ValueError: اگر x_position_mm خارج از بازه‌ی معتبر [0, 2000] باشد.
+    """
+    if not 0 <= x_position_mm <= 2000:
+        raise ValueError(f"x_position_mm خارج از بازه‌ی معتبر است: {x_position_mm}")
+
+    if x_position_mm < 500:
+        return 571.3
+    elif x_position_mm < 1000:
+        return 452.0
+    elif x_position_mm < 1500:
+        return 330.9
+    else:
+        return 210.8
 
 
-class DepthEstimator:
-    """تبدیل زمان پرواز موج به عمق فیزیکی نمونه (d = v * t / 2)."""
-
-    def __init__(self, wave_velocity: float):
-        """
-        Args:
-            wave_velocity: سرعت موج طولی در بتن، بر حسب متر بر ثانیه
-                (معمولاً ۳۵۰۰ تا ۴۵۰۰ m/s).
-        """
-        self.wave_velocity = wave_velocity
-
-    def estimate_depth(self, time_of_flight: float) -> float:
-        """
-        زمان پرواز رفت‌وبرگشت echo را به عمق فیزیکی تبدیل می‌کند.
-
-        نکته واحدها: ``time_of_flight`` از ``Signal.Time()`` می‌آید و بر
-        حسب میکروثانیه است، در حالی که ``wave_velocity`` بر حسب متر بر
-        ثانیه است. پیش از استفاده در d = v * t / 2 باید زمان به ثانیه
-        تبدیل شود، و چون خروجی مطلوب بر حسب میلی‌متر است (مطابق واحد
-        سایر عمق‌ها در پروژه، از جمله ``DepthCalibration``)، نتیجه نهایی
-        از متر به میلی‌متر هم تبدیل می‌شود.
-
-        Args:
-            time_of_flight: زمان پرواز رفت‌وبرگشت echo دیواره پشتی، بر
-                حسب میکروثانیه.
-
-        Returns:
-            عمق تخمینی بر حسب میلی‌متر.
-        """
-        time_of_flight_s = time_of_flight * 1e-6
-        depth_m = self.wave_velocity * time_of_flight_s / 2.0
-        return depth_m * 1000.0
+def estimate_depth(time_of_flight_us, wave_velocity):
+    time_of_flight_s = time_of_flight_us * 1e-6
+    depth_m = wave_velocity * time_of_flight_s / 2.0
+    return depth_m * 1000.0
