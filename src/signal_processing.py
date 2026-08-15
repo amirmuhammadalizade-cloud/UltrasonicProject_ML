@@ -1,14 +1,14 @@
 """پردازش سیگنال، استخراج ویژگی و برآورد عمق برای اندازه‌گیری‌های التراسونیک روی نمونه بتنی.
 
 ساختار فایل (به ترتیب جریان داده):
-    1. Signal / Filtering        -> دسترسی به داده خام و فیلترینگ سیگنال
-    2. TimeDomainFeatures         -> ویژگی‌های حوزه زمان
-    3. FrequencyDomainFeatures    -> ویژگی‌های حوزه فرکانس
+    1. Signal / Filtering -> دسترسی به داده خام و فیلترینگ سیگنال
+    2. TimeDomainFeatures -> ویژگی‌های حوزه زمان
+    3. FrequencyDomainFeatures -> ویژگی‌های حوزه فرکانس
     4. SignalFeatures / FeatureExtractor -> جمع‌آوری ویژگی‌ها در یک خروجی واحد
-    5. EchoDetector               -> آشکارسازی چند echo در یک A-scan
-    6. DepthEstimator             -> تبدیل زمان پرواز به عمق فیزیکی
-    7. signal_to_noise_ratio      -> معیار کیفیت سیگنال
-    8. DatasetBuilder             -> اجرای کل pipeline روی تمام نقاط شبکه
+    5. EchoDetector -> آشکارسازی چند echo در یک A-scan
+    6. DepthEstimator -> تبدیل زمان پرواز به عمق فیزیکی
+    7. signal_to_noise_ratio -> معیار کیفیت سیگنال
+    8. DatasetBuilder -> اجرای کل pipeline روی تمام نقاط شبکه
 """
 
 from dataclasses import asdict, dataclass
@@ -31,15 +31,9 @@ class Signal:
         """ماسک نقاطی از شبکه که داده واقعی دارند (غیر صفر)."""
         return np.any(self.data != 0, axis=2)
 
-    def compute_envelope(
-            self,
-            x_index: int,
-            y_index: int,
-            mask: np.ndarray | None = None,
-    ) -> np.ndarray:
-
-        if mask is None:
-            mask = self.non_empty_value_mask()
+    def compute_envelope(self, x_index: int, y_index: int) -> np.ndarray:
+        """پوش (envelope) یک A-scan را با تبدیل هیلبرت محاسبه می‌کند."""
+        mask = self.non_empty_value_mask()
 
         if not mask[x_index, y_index]:
             raise ValueError("Selected measurement point is empty.")
@@ -115,16 +109,11 @@ class TimeDomainFeatures:
         peak_index = np.argmax(self.signal)
         return float(self.time[peak_index])
 
-    def rise_time(self, low: float = 0.1, high: float = 0.9) -> float:
-        """زمان صعود سیگنال بین دو آستانه نسبی (پیش‌فرض ۱۰٪ تا ۹۰٪ دامنه پیک).
-
-        Args:
-            low: آستانه پایین به‌صورت کسری از دامنه پیک.
-            high: آستانه بالا به‌صورت کسری از دامنه پیک.
+    def peak_slope(self) -> float:
+        """شیب پیک.
 
         Returns:
-            فاصله زمانی بین عبور صعودی از آستانه پایین و بالا، پیش از پیک.
-            اگر یکی از آستانه‌ها یافت نشود صفر بازمی‌گردد.
+            شیب بزرگترین قله رو حساب میکنه
         """
         peak_index = int(np.argmax(self.signal))
         peak_value = self.signal[peak_index]
@@ -132,17 +121,21 @@ class TimeDomainFeatures:
         if peak_value <= 0 or peak_index == 0:
             return 0.0
 
-        low_level = low * peak_value
-        high_level = high * peak_value
+        low_level = 0
+        high_level = peak_value
         segment = self.signal[: peak_index + 1]
 
-        low_crossings = np.where(segment >= low_level)[0]
-        high_crossings = np.where(segment >= high_level)[0]
+        low_crossings = np.where(segment == low_level)[-1]
+        high_crossings = np.where(segment == high_level)[0]
 
         if low_crossings.size == 0 or high_crossings.size == 0:
             return 0.0
+        denominator = float(self.time[int(high_crossings[0])] - self.time[int(low_crossings[0])])
+        if denominator == 0:
+            return 0.0
 
-        return float(self.time[int(high_crossings[0])] - self.time[int(low_crossings[0])])
+        slope = peak_value / denominator
+        return slope
 
     def signal_energy(self) -> float:
         return float(np.sum(self.signal ** 2))
@@ -158,63 +151,41 @@ class FrequencyDomainFeatures:
         self.signal = signal
         self.sampling_rate = sampling_rate
 
-        # FFT فقط یک بار محاسبه می‌شود
-        self.frequencies, self.magnitude = self._magnitude_spectrum()
-
     def _magnitude_spectrum(self) -> tuple:
-        """طیف دامنه یک‌طرفه FFT را یک بار محاسبه می‌کند."""
+        """طیف دامنه یک‌طرفه FFT (فرکانس‌ها، دامنه‌های متناظر)."""
         spectrum = np.fft.rfft(self.signal)
-
-        frequencies = np.fft.rfftfreq(
-            self.signal.size,
-            d=1.0 / self.sampling_rate
-        )
-
+        frequencies = np.fft.rfftfreq(self.signal.size, d=1.0 / self.sampling_rate)
         magnitude = np.abs(spectrum)
-
         return frequencies, magnitude
 
     def dominant_frequency(self) -> float:
-        """فرکانسی که بیشترین دامنه را دارد."""
-
-        return float(
-            self.frequencies[int(np.argmax(self.magnitude))]
-        )
+        frequencies, magnitude = self._magnitude_spectrum()
+        return float(frequencies[int(np.argmax(magnitude))])
 
     def spectral_centroid(self) -> float:
-        """مرکز ثقل طیف فرکانسی."""
-
-        total_magnitude = np.sum(self.magnitude)
+        frequencies, magnitude = self._magnitude_spectrum()
+        total_magnitude = np.sum(magnitude)
 
         if total_magnitude == 0:
             return 0.0
 
-        return float(
-            np.sum(self.frequencies * self.magnitude)
-            / total_magnitude
-        )
+        return float(np.sum(frequencies * magnitude) / total_magnitude)
 
     def bandwidth(self, level_db: float = -6.0) -> float:
-        """پهنای باند بر اساس سطح افت نسبت به پیک."""
-
-        peak_magnitude = np.max(self.magnitude)
+        """پهنای باند سیگنال بر اساس آستانه سطح افت نسبت به پیک طیفی (پیش‌فرض ۶- دسی‌بل)."""
+        frequencies, magnitude = self._magnitude_spectrum()
+        peak_magnitude = np.max(magnitude)
 
         if peak_magnitude == 0:
             return 0.0
 
         threshold = peak_magnitude * (10 ** (level_db / 20.0))
-
-        above_threshold = np.where(
-            self.magnitude >= threshold
-        )[0]
+        above_threshold = np.where(magnitude >= threshold)[0]
 
         if above_threshold.size == 0:
             return 0.0
 
-        return float(
-            self.frequencies[above_threshold[-1]]
-            - self.frequencies[above_threshold[0]]
-        )
+        return float(frequencies[above_threshold[-1]] - frequencies[above_threshold[0]])
 
 
 @dataclass
@@ -223,7 +194,7 @@ class SignalFeatures:
 
     peak_amplitude: float
     time_of_flight: float
-    rise_time: float
+    peak_slope: float
     signal_energy: float
     rms: float
     dominant_frequency: float
@@ -245,7 +216,7 @@ class FeatureExtractor:
         return SignalFeatures(
             peak_amplitude=self.time_features.peak_amplitude(),
             time_of_flight=self.time_features.time_of_flight(),
-            rise_time=self.time_features.rise_time(),
+            peak_slope=self.time_features.peak_slope(),
             signal_energy=self.time_features.signal_energy(),
             rms=self.time_features.rms(),
             dominant_frequency=self.freq_features.dominant_frequency(),
