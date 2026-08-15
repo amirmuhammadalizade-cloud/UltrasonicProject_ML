@@ -28,6 +28,25 @@ Spatial visualization
 
 The project follows a physics-informed workflow rather than immediately applying complex deep-learning models.
 
+## Project Structure
+
+The codebase has moved from exploratory notebook cells into a small reusable `src/` package. Notebooks are now used for exploration and reporting only; the actual pipeline logic lives in modules.
+
+```text
+.
+├── notebooks/
+│   └── UT_ML.ipynb          # exploratory analysis, plots, physical validation
+├── src/
+│   ├── data_loader.py        # loads the four .npy files for a given sample
+│   ├── preprocessing.py      # valid-region mask, crop to measured grid
+│   ├── signal_processing.py  # Signal, Filtering, feature extractors, EchoDetector, DepthEstimator
+│   ├── depth_estimation.py   # DepthCalibration, GroundTruthDepth, DatasetBuilder
+│   └── dataset.xlsx          # generated feature dataset (output of DatasetBuilder)
+└── README.md
+```
+
+Data files (`*.npy`) are intentionally excluded from version control (see `.gitignore`) and are expected under `src/../data/`.
+
 ## Dataset
 
 The primary dataset is **Pk050**, acquired at the **Bundesanstalt für Materialforschung und -prüfung (BAM), Berlin**, using the pulse-echo ultrasonic method.
@@ -73,6 +92,12 @@ Shape: (201, 81, 4000)
 - [x] Preliminary Backwall Echo detection
 - [x] Physical validation using four known thicknesses
 - [x] Thickness vs. Backwall TOF regression
+- [x] Refactor exploratory code into a reusable `src/` package
+- [x] Object-oriented feature extraction pipeline (time-domain + frequency-domain)
+- [x] Full-grid dataset generation (`DatasetBuilder` → `dataset.xlsx`)
+- [ ] Frequency-domain feature validation (see *Known Issues*)
+- [ ] Classical ML baseline
+- [ ] Spatially-aware validation
 
 ## Zero-Vector Investigation
 
@@ -86,7 +111,7 @@ Zero A-scans:   2069
 Percentage:     12.71%
 ```
 
-These points were separated from the valid measurement region before signal analysis.
+These points were separated from the valid measurement region before signal analysis (`preprocessing.crop_to_measured_region`, `Signal.non_empty_value_mask`).
 
 ## Signal Processing
 
@@ -102,6 +127,15 @@ envelope = np.abs(analytic_signal)
 The envelope makes wave-packet and echo localization easier than direct inspection of the oscillating raw A-scan.
 
 A key observation is that the strongest peak in a raw A-scan is **not automatically the Backwall Echo**. Early probe/surface reflections and other internal reflections can be stronger.
+
+This logic is now encapsulated in `signal_processing.py`:
+
+- **`Signal`** — raw grid access, envelope computation, valid-point mask, real time axis (from `Z-values.npy`).
+- **`Filtering`** — a configurable, ordered chain of filters (`gaussian`, `median`, `uniform`, `savgol`) applied to the envelope.
+- **`TimeDomainFeatures`** — peak amplitude, time of flight, rise time, signal energy, RMS.
+- **`FrequencyDomainFeatures`** — dominant frequency, spectral centroid, bandwidth (via FFT).
+- **`EchoDetector`** — multi-echo peak detection on an A-scan.
+- **`DepthEstimator`** — physics-based `d = v·t/2` conversion, kept as an independent sanity check alongside the data-driven calibration.
 
 ## Backwall Echo Validation
 
@@ -132,59 +166,35 @@ t ≈ 2d / v
 
 the fitted slope corresponds to an approximate propagation velocity of 4.45 km/s.
 
-## Current Stage
+This calibration is now formalized as `DepthCalibration` in `depth_estimation.py`, fit once from the four known points and reused as an **input feature** (`calibrated_depth_estimate`), never as the ground-truth label — the true label always comes from the specimen's known step geometry (`GroundTruthDepth`), to avoid circular reasoning in the ML model.
 
-The project is now entering **Feature Engineering**.
+## Feature Engineering — Current Stage
 
-The first goal is to create an interpretable feature extractor for individual A-scans and validate it on the four known reference points before processing the entire dataset.
+The project has moved from a candidate feature list into a working, full-grid feature extraction pipeline.
 
-### Initial candidate features
+`DatasetBuilder` runs the complete pipeline over every valid measurement point and writes one row per point to `src/dataset.xlsx`.
 
-Time domain:
+**Current dataset:** 13,277 rows × 15 columns.
 
-- Mean
-- Standard deviation
-- RMS
-- Maximum amplitude
-- Minimum amplitude
-- Peak-to-peak amplitude
-- Signal energy
+| Column | Description |
+|---|---|
+| `x_index`, `y_index` | grid indices |
+| `x_position_mm`, `y_position_mm` | physical position |
+| `peak_amplitude` | envelope peak amplitude |
+| `time_of_flight` | time of the envelope peak (µs) |
+| `rise_time` | 10%–90% rise time before the peak |
+| `signal_energy` | Σ signal² |
+| `rms` | root-mean-square amplitude |
+| `dominant_frequency` | FFT peak frequency |
+| `spectral_centroid` | FFT-weighted mean frequency |
+| `bandwidth` | −6 dB bandwidth around the FFT peak |
+| `snr` | signal-to-noise ratio (dB) vs. an early noise window |
+| `calibrated_depth_estimate` | depth from `DepthCalibration` (feature, not label) |
+| `true_depth` | depth from specimen geometry (label) |
 
-Envelope:
+### Known Issues
 
-- Maximum envelope
-- Envelope energy
-- Number of peaks
-- Peak positions
-- Peak amplitudes
-
-Backwall:
-
-- Backwall TOF
-- Backwall envelope amplitude
-- Backwall peak amplitude
-- Local energy around the Backwall Echo
-
-Later, frequency-domain features can be added:
-
-- Dominant frequency
-- Spectral energy
-- Spectral centroid
-- Bandwidth
-
-A first feature table may look like:
-
-```text
-X
-Y
-RMS
-STD
-Energy
-Envelope_Max
-BW_TOF
-BW_Amplitude
-Thickness
-```
+- **`dominant_frequency` / `bandwidth` are currently unreliable.** Both are computed by `FrequencyDomainFeatures` on the **Hilbert envelope** rather than the raw RF A-scan. Since the envelope is non-negative, its FFT is dominated by the DC component, which pins `dominant_frequency` to 0 Hz for essentially every point and collapses `bandwidth` to near-zero. Fix in progress: compute frequency-domain features from the raw (pre-envelope) A-scan instead, while keeping envelope-based time-domain features as they are.
 
 ## Machine Learning Plan
 
@@ -320,14 +330,14 @@ DOI: `10.1016/j.dib.2023.109233`
 
 ```text
 Dataset Understanding       ████████████████████ 100%
-Signal Analysis             ████████████████████ 100%
-Echo Investigation          ████████████████████ 100%
-Physical Validation         ████████████████████ 100%
-Feature Engineering         ░░░░░░░░░░░░░░░░░░░░   0%
-Classical ML                ░░░░░░░░░░░░░░░░░░░░   0%
-Spatial Validation          ░░░░░░░░░░░░░░░░░░░░   0%
-Deep Learning               ░░░░░░░░░░░░░░░░░░░░   0%
-Prototype UI                ░░░░░░░░░░░░░░░░░░░░   0%
+Signal Analysis              ████████████████████ 100%
+Echo Investigation           ████████████████████ 100%
+Physical Validation          ████████████████████ 100%
+Feature Engineering          ████████████████░░░░  80%
+Classical ML                 ░░░░░░░░░░░░░░░░░░░░   0%
+Spatial Validation           ░░░░░░░░░░░░░░░░░░░░   0%
+Deep Learning                ░░░░░░░░░░░░░░░░░░░░   0%
+Prototype UI                 ░░░░░░░░░░░░░░░░░░░░   0%
 ```
 
-**Current milestone: Feature Engineering → Classical ML → Spatial Validation**
+**Current milestone: Fix frequency-domain features → Classical ML → Spatial Validation**
