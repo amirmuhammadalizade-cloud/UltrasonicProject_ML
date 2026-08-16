@@ -301,3 +301,84 @@ def estimate_depth(time_of_flight_us, wave_velocity):
     time_of_flight_s = time_of_flight_us * 1e-6
     depth_m = wave_velocity * time_of_flight_s / 2.0
     return depth_m * 1000.0
+
+def threshold_crossing_window(snr_value, snr_low=3.876, snr_high=4.830, min_half_width=0.02, max_half_width=0.10):
+    """
+    بر اساس SNR سیگنال، نیم‌پهنای پنجره‌ی آستانه (حول ۵۰٪ پیک) را با
+    درون‌یابی خطی تعیین می‌کند. SNR کمتر (نویزی‌تر) -> پنجره‌ی پهن‌تر.
+    SNR بیشتر (تمیزتر) -> پنجره‌ی باریک‌تر.
+    """
+    snr_clipped = np.clip(snr_value, snr_low, snr_high)
+    ratio = (snr_clipped - snr_low) / (snr_high - snr_low)
+    half_width = max_half_width - ratio * (max_half_width - min_half_width)
+    return half_width
+
+
+def threshold_crossing_echo(signal, time, snr_value):
+    """
+    اولین بیشینه‌ی معنادار بعد از رد شدن از یک کمینه‌ی محلی را از طریق
+    عبور از آستانه‌ی درصدی (حول ۵۰٪ پیک) تشخیص می‌دهد.
+
+    ابتدا اولین کمینه‌ی محلی سیگنال پیدا می‌شود (برای عبور از لبه‌ی نزولی
+    باقیمانده‌ی dead zone/ringdown)، سپس جست‌وجوی عبور از آستانه فقط از آن
+    نقطه به بعد انجام می‌شود.
+    """
+    signal = np.asarray(signal, dtype=float)
+    time = np.asarray(time, dtype=float)
+
+    if signal.size < 2:
+        return 0.0, 0.0
+
+    diffs = np.diff(signal)
+    local_min_candidates = np.where((diffs[:-1] <= 0) & (diffs[1:] > 0))[0]
+
+    start_index = int(local_min_candidates[0] + 1) if local_min_candidates.size > 0 else 0
+
+    search_signal = signal[start_index:]
+    search_time = time[start_index:]
+
+    if search_signal.size == 0:
+        return 0.0, 0.0
+
+    half_width = threshold_crossing_window(snr_value)
+    peak_amplitude_value = float(np.max(search_signal))
+    lower_threshold = peak_amplitude_value * (0.5 - half_width)
+
+    above_threshold = np.where(search_signal >= lower_threshold)[0]
+    if above_threshold.size == 0:
+        return 0.0, 0.0
+
+    crossing_index = int(above_threshold[0])
+    return float(search_signal[crossing_index]), float(search_time[crossing_index])
+
+def find_local_maxima_in_window(signal, time, snr_value):
+    """
+    با محاسبه‌ی مشتق گسسته‌ی سیگنال، نقاطی که مشتق از مثبت به منفی عبور
+    می‌کند (بیشینه‌های محلی) را پیدا می‌کند و فقط آن‌هایی را که دامنه‌شان
+    در پنجره‌ی آستانه (حول ۵۰٪ پیک) قرار دارد برمی‌گرداند.
+
+    Returns:
+        لیستی از تاپل‌های (time, amplitude)، مرتب‌شده بر اساس زمان.
+    """
+    signal = np.asarray(signal, dtype=float)
+    time = np.asarray(time, dtype=float)
+
+    if signal.size < 3:
+        return []
+
+    derivative = np.diff(signal)
+
+    # مثبت -> منفی یعنی بیشینه‌ی محلی
+    maxima_indices = np.where((derivative[:-1] > 0) & (derivative[1:] <= 0))[0] + 1
+
+    peak_amplitude_value = float(np.max(signal))
+    lower_bound = 0
+    upper_bound = peak_amplitude_value 
+
+    candidates = [
+        (float(time[i]), float(signal[i]))
+        for i in maxima_indices
+        if lower_bound <= signal[i] <= upper_bound
+    ]
+
+    return candidates

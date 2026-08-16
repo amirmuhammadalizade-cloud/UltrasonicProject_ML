@@ -65,3 +65,5 @@ if __name__ == "__main__":
     # sanity check: groundtruth vs time_of_flight should now correlate strongly
     print(df[["x_position_mm", "groundtruth", "time_of_flight"]].corr())
     print(df.groupby("groundtruth")["time_of_flight"].agg(["mean", "std"]))
+
+    print(df["snr"].quantile([0.05, 0.95]))
