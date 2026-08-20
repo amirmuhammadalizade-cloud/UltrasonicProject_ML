@@ -7,6 +7,10 @@ from pathlib import Path
 import numpy as np
 
 class File:
+    """
+    می توان با استفاده از این کلاس 
+    از داده های تست التروسونیک استفاده کرد  
+    """
     def __init__(self) -> None:
         pass
         DATA_DIR = Path(r"C:\Users\asus\PycharmProjects\UltrasonicProject_ML\data")
@@ -18,6 +22,3 @@ class File:
         self.x = np.load(DATA_DIR / "X-values.npy")
         self.y = np.load(DATA_DIR / "Y-values.npy")
         self.t = np.load(DATA_DIR / "Z-values.npy")
-
-file = File()
-print(file.t)
