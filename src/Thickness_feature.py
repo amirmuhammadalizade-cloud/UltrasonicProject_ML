@@ -26,7 +26,7 @@
 """
 
 from pathlib import Path
-import matplotlib as plt
+import matplotlib.pyplot as plt
 import numpy as np
 from scipy.signal import find_peaks, hilbert
 from sklearn.ensemble import RandomForestRegressor
@@ -778,59 +778,6 @@ def print_feature_stats_per_step(rows, feature_names=None):
             )
 
 # =========================================================================
-# =========================================================================
-# 7.8. رسم نمونه‌ی سیگنال‌ها به‌همراه period/اکوهای تشخیص‌داده‌شده
-# =========================================================================
-def plot_example_signals_per_step(rows, data, time_us, output_dir=".", n_examples=3):
-    """
-    برای هر پله، چند نمونه سیگنال خام (میانه، بیشترین و کمترین echo_period_us)
-    را همراه با period تشخیص‌داده‌شده و موقعیت اکوهای backwall رسم می‌کند.
-    هدف: چشمی بررسی کنیم آیا الگوریتم autocorrelation دارد روی اکوی درست
-    قفل می‌کند یا روی هارمونیک/اکوی اشتباه.
-    """
-    import matplotlib.pyplot as plt
-
-    output_dir = Path(output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
-
-    for step in sorted(STEP_THICKNESS_MM.keys()):
-        step_rows = [r for r in rows if r["step"] == step]
-        if not step_rows:
-            continue
-
-        periods = np.array([r["echo_period_us"] for r in step_rows])
-        order = np.argsort(periods)
-        # سه نمونه: کمترین period، میانه، بیشترین period
-        pick_idx = [order[0], order[len(order) // 2], order[-1]]
-        picks = [step_rows[i] for i in pick_idx]
-
-        fig, axes = plt.subplots(len(picks), 1, figsize=(10, 3 * len(picks)))
-        if len(picks) == 1:
-            axes = [axes]
-
-        for ax, r in zip(axes, picks):
-            signal = data[r["x_idx"], r["y_idx"], :]
-            ax.plot(time_us, signal, linewidth=0.7)
-            period = r["echo_period_us"]
-            first_t = r["first_echo_time"]
-            # چند تا اکوی مبتنی بر period تشخیص‌داده‌شده را با خط عمودی نشان بده
-            for k in range(1, 5):
-                t_echo = first_t + k * period
-                if t_echo <= time_us.max():
-                    ax.axvline(t_echo, color="red", linestyle="--", linewidth=0.8)
-            ax.set_title(
-                f"پله {step} (d={STEP_THICKNESS_MM[step]}mm) | "
-                f"x_idx={r['x_idx']} y_idx={r['y_idx']} | "
-                f"echo_period_us={period:.1f} first_echo={first_t:.1f}"
-            )
-            ax.set_xlabel("زمان (us)")
-
-        plt.tight_layout()
-        out_path = output_dir / f"diagnostic_signals_step{step}.png"
-        plt.savefig(out_path, dpi=150)
-        plt.close(fig)
-        print(f"نمودار نمونه‌سیگنال‌های پله {step} ذخیره شد در: {out_path}")
-# =========================================================================
 # 8. اجرای اصلی
 # =========================================================================
 def main():
@@ -908,13 +855,10 @@ def main():
         print("هیچ نمونه‌ای محاسبه نشد — بارگذاری داده یا آستانه‌ها را بررسی کن.")
         return
 
-    print_feature_stats_per_step(rows)   
-    
-    plot_example_signals_per_step(rows, data, time_us)   # ← این خط جدید
+    print_feature_stats_per_step(rows)
 
     run_regression_models(rows)
 
-    run_regression_models(rows)
     run_diagnostics(rows)
     run_linear_baseline(rows, feature_name="echo_period_us")
     run_linear_baseline(rows, feature_name="echo_period_linfit")
