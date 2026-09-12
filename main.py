@@ -43,7 +43,7 @@ class Signal:
 
 signal = Signal(data.scan)
 
-s, t = signal.a_scan(25, 12)
+s, t = signal.a_scan(25, 11)
 
 
 plt.plot(t, s)
